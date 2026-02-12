@@ -19,14 +19,22 @@
         {% else %}
         <div class="card success-page">
             <h2>✅ Files Ready</h2>
+
             <div class="code-display-small">Code: {{ code }}</div>
+
             <button class="btn-copy" onclick="copyCode('{{ code }}')">
                 📋 Copy Code
             </button>
 
-            {% if time_remaining %}
-            <p class="expire-warning">⏱️ Expires in {{ time_remaining }}</p>
-            {% endif %}
+            <div class="timer-container">
+                <p class="timer-label">⏱️ Time Remaining:</p>
+                <div class="countdown-timer" id="countdown-timer">
+                    <span id="timer-display">Loading...</span>
+                </div>
+                <p class="timer-warning" id="timer-warning" style="display: none;">
+                    ⚠️ Files will be deleted automatically when timer expires
+                </p>
+            </div>
 
             {% if share_url %}
             <div class="share-section">
@@ -42,6 +50,7 @@
 
             <div class="files-container">
                 <h3>Available Files:</h3>
+
                 {% for file in files %}
                 <div class="download-file-item">
                     <div class="file-info">
@@ -51,6 +60,7 @@
                             <span class="file-size-small">{{ file.size }}</span>
                         </div>
                     </div>
+
                     <a href="{{ url_for('get_file', code=code, index=loop.index0) }}" class="btn-icon"
                         title="Download {{ file.original_name }}">
                         📥
@@ -75,58 +85,14 @@
     </div>
 
     <footer class="footer">
-        <p>Designed & Developed by Parimal Hodar | <a
-                href="mailto:parimalhodar.dev@gmail.com">parimalhodar.dev@gmail.com</a></p>
+        <p>
+            Designed & Developed by Parimal Hodar |
+            <a href="mailto:parimalhodar.dev@gmail.com">
+                parimalhodar.dev@gmail.com
+            </a>
+        </p>
     </footer>
 
-    {% if time_remaining %}
-    <script>
-        // Auto-refresh countdown every second
-        setTimeout(() => {
-            location.reload();
-        }, 5000); // Refresh every 5 seconds to update timer
-
-        function copyCode(code) {
-            navigator.clipboard.writeText(code).then(() => {
-                const btn = event.target;
-                const originalText = btn.innerHTML;
-                btn.innerHTML = '✅ Copied!';
-                btn.style.background = '#4CAF50';
-                setTimeout(() => {
-                    btn.innerHTML = originalText;
-                    btn.style.background = '';
-                }, 2000);
-            }).catch(err => {
-                alert('Failed to copy code');
-            });
-        }
-
-        function copyUrl() {
-            const urlInput = document.getElementById('shareUrl');
-            urlInput.select();
-            urlInput.setSelectionRange(0, 99999); // For mobile
-
-            navigator.clipboard.writeText(urlInput.value).then(() => {
-                const btn = event.target;
-                const originalText = btn.innerHTML;
-                btn.innerHTML = '✅ Copied!';
-                btn.style.background = '#4CAF50';
-                setTimeout(() => {
-                    btn.innerHTML = originalText;
-                    btn.style.background = '';
-                }, 2000);
-            }).catch(err => {
-                // Fallback for older browsers
-                document.execCommand('copy');
-                const btn = event.target;
-                btn.innerHTML = '✅ Copied!';
-                setTimeout(() => {
-                    btn.innerHTML = '📋 Copy Link';
-                }, 2000);
-            });
-        }
-    </script>
-    {% else %}
     <script>
         function copyCode(code) {
             navigator.clipboard.writeText(code).then(() => {
@@ -134,11 +100,12 @@
                 const originalText = btn.innerHTML;
                 btn.innerHTML = '✅ Copied!';
                 btn.style.background = '#4CAF50';
+
                 setTimeout(() => {
                     btn.innerHTML = originalText;
                     btn.style.background = '';
                 }, 2000);
-            }).catch(err => {
+            }).catch(() => {
                 alert('Failed to copy code');
             });
         }
@@ -146,29 +113,85 @@
         function copyUrl() {
             const urlInput = document.getElementById('shareUrl');
             urlInput.select();
-            urlInput.setSelectionRange(0, 99999); // For mobile
+            urlInput.setSelectionRange(0, 99999);
 
             navigator.clipboard.writeText(urlInput.value).then(() => {
                 const btn = event.target;
                 const originalText = btn.innerHTML;
                 btn.innerHTML = '✅ Copied!';
                 btn.style.background = '#4CAF50';
+
                 setTimeout(() => {
                     btn.innerHTML = originalText;
                     btn.style.background = '';
                 }, 2000);
-            }).catch(err => {
-                // Fallback for older browsers
+            }).catch(() => {
                 document.execCommand('copy');
-                const btn = event.target;
-                btn.innerHTML = '✅ Copied!';
-                setTimeout(() => {
-                    btn.innerHTML = '📋 Copy Link';
-                }, 2000);
             });
         }
+
+        function startCountdown(code) {
+            const timerDisplay = document.getElementById('timer-display');
+            const timerWarning = document.getElementById('timer-warning');
+            const countdownTimer = document.getElementById('countdown-timer');
+
+            function updateTimer() {
+                fetch(`/api/check/${code}`)
+                    .then(response => response.json())
+                    .then(data => {
+
+                        if (!data.valid || data.expired) {
+                            timerDisplay.textContent = 'EXPIRED';
+                            timerDisplay.style.color = '#c62828';
+                            countdownTimer.style.background = '#ffebee';
+                            timerWarning.style.display = 'block';
+                            timerWarning.textContent =
+                                '❌ Files have been deleted. Redirecting to home...';
+                            timerWarning.style.color = '#c62828';
+
+                            setTimeout(() => {
+                                window.location.href = '/';
+                            }, 3000);
+
+                            return;
+                        }
+
+                        const minutes = Math.floor(data.remaining_seconds / 60);
+                        const seconds = data.remaining_seconds % 60;
+
+                        timerDisplay.textContent =
+                            `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+
+                        if (data.remaining_seconds <= 60) {
+                            timerDisplay.style.color = '#c62828';
+                            countdownTimer.style.background = '#ffebee';
+                            timerWarning.style.display = 'block';
+                        } else if (data.remaining_seconds <= 300) {
+                            timerDisplay.style.color = '#f57c00';
+                            countdownTimer.style.background = '#fff3e0';
+                        } else {
+                            timerDisplay.style.color = '#2e7d32';
+                            countdownTimer.style.background = '#e8f5e9';
+                        }
+
+                        setTimeout(updateTimer, 1000);
+                    })
+                    .catch(() => {
+                        timerDisplay.textContent = 'ERROR';
+                    });
+            }
+
+            updateTimer();
+        }
+
+        // ✅ SAFE JINJA → JS (NO VS CODE ERRORS)
+        const downloadCode = "{{ code | default('') }}";
+
+        if (downloadCode) {
+            startCountdown(downloadCode);
+        }
+
     </script>
-    {% endif %}
 
 </body>
 

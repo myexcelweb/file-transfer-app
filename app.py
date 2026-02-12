@@ -1,270 +1,330 @@
-from flask import Flask, render_template, request, send_from_directory, jsonify, url_for
+# pyright: reportOptionalMemberAccess=false
+from flask import Flask, render_template, request, send_file, jsonify, send_from_directory
 import os
 import random
 import string
+import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 import threading
 import time
 import zipfile
 from io import BytesIO
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
+# ────────────────────────────────────────────────
+#  CONFIGURATION
+# ────────────────────────────────────────────────
+
 UPLOAD_FOLDER = "uploads"
+MAX_TOTAL_SIZE_BYTES = 100 * 1024 * 1024      # 100 MB total
+MAX_SINGLE_FILE_SIZE_BYTES = 80 * 1024 * 1024  # prevent one huge file
+
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB limit
+app.config["MAX_CONTENT_LENGTH"] = MAX_TOTAL_SIZE_BYTES
 
 # Ensure upload folder exists
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+Path(UPLOAD_FOLDER).mkdir(parents=True, exist_ok=True)
 
-# Get base URL for sharing
-def get_base_url():
-    """Get the base URL for the application"""
-    # In production, you should set SERVER_NAME in config
-    # For now, we'll try to detect it from the request
-    return request.url_root.rstrip('/')
+# ────────────────────────────────────────────────
+#  LOGGING
+# ────────────────────────────────────────────────
 
-# Enhanced file store: code -> {files: [{filename, original_name, size, type}], timestamp}
-file_store = {}
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
-def generate_code():
-    return ''.join(random.choices(string.digits, k=6))
+# ────────────────────────────────────────────────
+#  STARTUP CLEANUP – aggressive cleanup of old files
+# ────────────────────────────────────────────────
 
+def startup_cleanup():
+    MAX_STARTUP_AGE_MIN = 30
+    count = 0
+    now = time.time()
+    for path in Path(UPLOAD_FOLDER).iterdir():
+        if path.is_file():
+            age_min = (now - path.stat().st_mtime) / 60
+            if age_min > MAX_STARTUP_AGE_MIN:
+                try:
+                    path.unlink()
+                    count += 1
+                    logger.info(f"Startup deleted old file: {path.name} ({age_min:.1f} min old)")
+                except Exception as e:
+                    logger.error(f"Startup delete failed {path.name}: {e}")
+    if count:
+        logger.info(f"Startup cleanup removed {count} old files")
 
-def get_file_size(size_bytes):
-    """Convert bytes to human readable format"""
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.1f} TB"
+startup_cleanup()
 
+# ────────────────────────────────────────────────
+#  IN-MEMORY STORE (still used, but not the only truth)
+# ────────────────────────────────────────────────
 
-def get_file_type(filename):
-    """Get file extension/type"""
-    return os.path.splitext(filename)[1][1:].upper() or 'FILE'
+file_store = {}  # code → {"files": [...], "timestamp": datetime}
 
+def generate_code(length: int = 6) -> str:
+    return ''.join(random.choices(string.digits, k=length))
+
+def get_human_size(size_bytes: int | float) -> str:
+    size: float = float(size_bytes)
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024.0:
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} PB"
+
+def get_file_type(filename: str) -> str:
+    ext = Path(filename).suffix.lstrip('.')
+    return ext.upper() if ext else "FILE"
+
+# ────────────────────────────────────────────────
+#  STRONG BACKGROUND CLEANUP – disk-first + unknown files
+# ────────────────────────────────────────────────
 
 def cleanup_old_files():
-    """Background task to delete files older than 15 minutes"""
+    EXPIRATION_SECONDS = 15 * 60          # 15 minutes
+    CHECK_INTERVAL_SECONDS = 60           # check every 1 minute
+
     while True:
         try:
-            current_time = datetime.now()
-            codes_to_delete = []
-            
-            for code, data in file_store.items():
-                timestamp = data.get('timestamp')
-                if timestamp and (current_time - timestamp) > timedelta(minutes=15):
-                    # Delete all files associated with this code
-                    for file_info in data.get('files', []):
-                        filepath = os.path.join(app.config["UPLOAD_FOLDER"], file_info['filename'])
-                        try:
-                            if os.path.exists(filepath):
-                                os.remove(filepath)
-                                print(f"Deleted: {filepath}")
-                        except Exception as e:
-                            print(f"Error deleting {filepath}: {e}")
-                    codes_to_delete.append(code)
-            
-            # Remove codes from store
-            for code in codes_to_delete:
-                del file_store[code]
-                print(f"Removed code: {code}")
-                
-        except Exception as e:
-            print(f"Cleanup error: {e}")
-        
-        time.sleep(60)  # Check every minute
+            now = time.time()
+            upload_path = Path(UPLOAD_FOLDER)
 
+            if not upload_path.exists():
+                time.sleep(CHECK_INTERVAL_SECONDS)
+                continue
+
+            deleted_expired = 0
+            deleted_unknown = 0
+
+            for path in upload_path.iterdir():
+                if not path.is_file():
+                    continue
+
+                age_seconds = now - path.stat().st_mtime
+
+                # Delete expired files (based on disk timestamp)
+                if age_seconds > EXPIRATION_SECONDS:
+                    try:
+                        path.unlink()
+                        deleted_expired += 1
+                        logger.info(f"Deleted expired file: {path.name} (age: {age_seconds//60:.0f} min)")
+                    except Exception as e:
+                        logger.error(f"Failed to delete expired {path.name}: {e}")
+
+                # Delete unknown/orphan files (not matching 6digits_ pattern)
+                elif not (path.name[:6].isdigit() and path.name[6] == '_'):
+                    try:
+                        path.unlink()
+                        deleted_unknown += 1
+                        logger.info(f"Deleted unknown/orphan file: {path.name}")
+                    except Exception as e:
+                        logger.error(f"Failed to delete unknown {path.name}: {e}")
+
+            if deleted_expired or deleted_unknown:
+                logger.info(
+                    f"Cleanup: removed {deleted_expired} expired + {deleted_unknown} unknown files"
+                )
+
+            # Also clean memory store (optional but good hygiene)
+            expired_codes = []
+            for code, data in list(file_store.items()):
+                ts = data.get("timestamp")
+                if ts and (datetime.now() - ts).total_seconds() > EXPIRATION_SECONDS:
+                    expired_codes.append(code)
+
+            for code in expired_codes:
+                del file_store[code]
+                logger.debug(f"Removed expired code from memory: {code}")
+
+        except Exception as e:
+            logger.error(f"Cleanup thread error: {e}")
+
+        time.sleep(CHECK_INTERVAL_SECONDS)
 
 # Start cleanup thread
-cleanup_thread = threading.Thread(target=cleanup_old_files, daemon=True)
-cleanup_thread.start()
+threading.Thread(target=cleanup_old_files, daemon=True).start()
 
+# ────────────────────────────────────────────────
+#  ROUTES
+# ────────────────────────────────────────────────
 
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
-        try:
-            files = request.files.getlist("file")
-            
-            if not files or all(not f.filename for f in files):
-                return render_template("index.html", error="No files selected")
-            
-            code = generate_code()
-            uploaded_files = []
-            total_size = 0
-            
-            for file in files:
-                if file and file.filename:
-                    original_name = str(file.filename)
-                    file_size = 0
-                    
-                    # Save file and get size
-                    filename = f"{code}_{original_name}"
-                    filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-                    file.save(filepath)
-                    file_size = os.path.getsize(filepath)
-                    total_size += file_size
-                    
-                    # Check total size doesn't exceed 100MB
-                    if total_size > 100 * 1024 * 1024:
-                        # Delete all uploaded files for this code
-                        for uf in uploaded_files:
-                            try:
-                                os.remove(os.path.join(app.config["UPLOAD_FOLDER"], uf['filename']))
-                            except:
-                                pass
-                        return render_template("index.html", error="Total file size exceeds 100MB limit")
-                    
-                    uploaded_files.append({
-                        'filename': filename,
-                        'original_name': original_name,
-                        'size': get_file_size(file_size),
-                        'type': get_file_type(original_name)
-                    })
-            
-            if uploaded_files:
-                file_store[code] = {
-                    'files': uploaded_files,
-                    'timestamp': datetime.now()
-                }
-                
-                # Generate share URL
-                base_url = get_base_url()
-                share_url = f"{base_url}/d/{code}"
-                
-                return render_template("index.html", code=code, files=uploaded_files, share_url=share_url)
-        except Exception as e:
-            print(f"Upload error: {e}")
-            return render_template("index.html", error=f"Upload failed: {str(e)}")
-    
+        files = request.files.getlist("file")
+        if not files or all(not f.filename.strip() for f in files):
+            return render_template("index.html", error="No files selected")
+
+        code = generate_code()
+        uploaded_files = []
+        total_size = 0
+
+        for file in files:
+            if not file or not file.filename:
+                continue
+
+            original_name = file.filename
+            safe_name = secure_filename(original_name)
+            stored_name = f"{code}_{safe_name}"
+
+            path = Path(UPLOAD_FOLDER) / stored_name
+            file.save(path)
+
+            file_size = path.stat().st_size
+            total_size += file_size
+
+            if total_size > MAX_TOTAL_SIZE_BYTES:
+                for f in uploaded_files:
+                    (Path(UPLOAD_FOLDER) / f["filename"]).unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
+                return render_template("index.html", error="Total size exceeds 100 MB limit")
+
+            if file_size > MAX_SINGLE_FILE_SIZE_BYTES:
+                path.unlink(missing_ok=True)
+                return render_template("index.html", error="Single file too large (max ~80 MB)")
+
+            uploaded_files.append({
+                "filename": stored_name,
+                "original_name": original_name,
+                "size": get_human_size(file_size),
+                "type": get_file_type(original_name)
+            })
+
+        if not uploaded_files:
+            return render_template("index.html", error="No valid files uploaded")
+
+        file_store[code] = {
+            "files": uploaded_files,
+            "timestamp": datetime.now()
+        }
+
+        base = request.url_root.rstrip("/")
+        share_url = f"{base}/d/{code}"
+
+        logger.info(f"New upload – code: {code} – files: {len(uploaded_files)}")
+
+        return render_template(
+            "index.html",
+            code=code,
+            files=uploaded_files,
+            share_url=share_url
+        )
+
     return render_template("index.html")
 
 
-@app.route("/download", methods=["POST"])
-def download():
-    code = request.form.get("code")
-    
-    if code and code in file_store:
-        data = file_store[code]
-        files = data.get('files', [])
-        timestamp = data.get('timestamp')
-        
-        # Calculate time remaining
-        time_remaining = None
-        if timestamp:
-            elapsed = datetime.now() - timestamp
-            remaining = timedelta(minutes=15) - elapsed
-            if remaining.total_seconds() > 0:
-                minutes = int(remaining.total_seconds() // 60)
-                seconds = int(remaining.total_seconds() % 60)
-                time_remaining = f"{minutes}m {seconds}s"
-        
-        # Generate share URL
-        base_url = get_base_url()
-        share_url = f"{base_url}/d/{code}"
-        
-        return render_template("download.html", code=code, files=files, 
-                             time_remaining=time_remaining, share_url=share_url)
-    else:
-        return render_template("download.html", error="Invalid or expired code")
-
-
 @app.route("/d/<code>")
-def direct_download(code):
-    """Direct download page accessed via shareable URL"""
-    if code and code in file_store:
-        data = file_store[code]
-        files = data.get('files', [])
-        timestamp = data.get('timestamp')
-        
-        # Calculate time remaining
-        time_remaining = None
-        if timestamp:
-            elapsed = datetime.now() - timestamp
-            remaining = timedelta(minutes=15) - elapsed
-            if remaining.total_seconds() > 0:
-                minutes = int(remaining.total_seconds() // 60)
-                seconds = int(remaining.total_seconds() % 60)
-                time_remaining = f"{minutes}m {seconds}s"
-        
-        # Generate share URL
-        base_url = get_base_url()
-        share_url = f"{base_url}/d/{code}"
-        
-        return render_template("download.html", code=code, files=files, 
-                             time_remaining=time_remaining, share_url=share_url)
-    else:
+@app.route("/download", methods=["POST"])
+def download_page(code: str | None = None):
+    if code is None and request.method == "POST":
+        code = request.form.get("code", "").strip()
+
+    if not code or code not in file_store:
         return render_template("download.html", error="Invalid or expired code")
+
+    data = file_store[code]
+    files = data["files"]
+
+    base = request.url_root.rstrip("/")
+    share_url = f"{base}/d/{code}"
+
+    return render_template(
+        "download.html",
+        code=code,
+        files=files,
+        share_url=share_url
+    )
 
 
 @app.route("/get_file/<code>/<int:index>")
-def get_file(code, index):
-    """Download a single file"""
-    if code in file_store:
-        files = file_store[code].get('files', [])
-        if 0 <= index < len(files):
-            filename = files[index]['filename']
-            original_name = files[index]['original_name']
-            return send_from_directory(
-                app.config["UPLOAD_FOLDER"], 
-                filename, 
-                as_attachment=True,
-                download_name=original_name
-            )
-    return "File not found!", 404
+def get_file(code: str, index: int):
+    if code not in file_store:
+        return "Not found", 404
+
+    files = file_store[code].get("files", [])
+    if not (0 <= index < len(files)):
+        return "Invalid file index", 404
+
+    info = files[index]
+    return send_from_directory(
+        UPLOAD_FOLDER,
+        info["filename"],
+        as_attachment=True,
+        download_name=info["original_name"]
+    )
 
 
 @app.route("/get_all_files/<code>")
-def get_all_files(code):
-    """Download all files as a ZIP"""
+def get_all_files(code: str):
     if code not in file_store:
-        return "Files not found!", 404
-    
-    files = file_store[code].get('files', [])
-    
+        return "Not found", 404
+
+    files = file_store[code].get("files", [])
+
     if len(files) == 1:
-        # If only one file, download it directly
-        filename = files[0]['filename']
-        original_name = files[0]['original_name']
+        info = files[0]
         return send_from_directory(
-            app.config["UPLOAD_FOLDER"], 
-            filename, 
+            UPLOAD_FOLDER,
+            info["filename"],
             as_attachment=True,
-            download_name=original_name
+            download_name=info["original_name"]
         )
-    
-    # Create ZIP file in memory
-    memory_file = BytesIO()
-    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for file_info in files:
-            filepath = os.path.join(app.config["UPLOAD_FOLDER"], file_info['filename'])
-            if os.path.exists(filepath):
-                zf.write(filepath, file_info['original_name'])
-    
-    memory_file.seek(0)
-    
-    return send_from_directory(
-        directory=app.config["UPLOAD_FOLDER"],
-        path='',
+
+    memory = BytesIO()
+    with zipfile.ZipFile(memory, "w", zipfile.ZIP_DEFLATED) as zf:
+        for info in files:
+            path = Path(UPLOAD_FOLDER) / info["filename"]
+            if path.is_file():
+                zf.write(path, info["original_name"])
+
+    memory.seek(0)
+
+    return send_file(
+        memory,
         as_attachment=True,
-        download_name=f'files_{code}.zip',
-        mimetype='application/zip'
-    ), 200, {
-        'Content-Disposition': f'attachment; filename=files_{code}.zip',
-        'Content-Type': 'application/zip',
-    }
+        download_name=f"files_{code}.zip",
+        mimetype="application/zip"
+    )
+
+
+@app.route("/api/check/<code>")
+def api_check(code: str):
+    if code not in file_store:
+        return jsonify({"valid": False, "expired": True, "remaining_seconds": 0})
+
+    ts = file_store[code].get("timestamp")
+    if not ts:
+        return jsonify({"valid": False, "expired": True, "remaining_seconds": 0})
+
+    remaining = (timedelta(minutes=15) - (datetime.now() - ts)).total_seconds()
+    if remaining <= 0:
+        return jsonify({"valid": False, "expired": True, "remaining_seconds": 0})
+
+    return jsonify({
+        "valid": True,
+        "expired": False,
+        "remaining_seconds": int(remaining),
+        "minutes": int(remaining // 60),
+        "seconds": int(remaining % 60)
+    })
 
 
 @app.route("/static/<path:filename>")
-def static_files(filename):
-    """Serve static files"""
-    return send_from_directory('static', filename)
+def static_files(filename: str):
+    return send_from_directory("static", filename)
 
 
-# Render compatible run
+# ────────────────────────────────────────────────
+#  ENTRY POINT
+# ────────────────────────────────────────────────
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, debug=False)

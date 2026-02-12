@@ -41,7 +41,17 @@
                 <button class="btn-copy" onclick="copyCode('{{ code }}')">
                     📋 Copy Code
                 </button>
-                <p class="expire-info">⏱️ Expires in 15 minutes</p>
+
+                <div class="timer-container">
+                    <p class="timer-label">⏱️ Time Remaining:</p>
+                    <div class="countdown-timer" id="countdown-timer">
+                        <span id="timer-display">Loading...</span>
+                    </div>
+                    <p class="timer-warning" id="timer-warning" style="display: none;">
+                        ⚠️ Files will be deleted automatically when timer expires
+                    </p>
+                </div>
+
                 <p>Share this code to download the files</p>
 
                 {% if share_url %}
@@ -83,8 +93,11 @@
     </div>
 
     <footer class="footer">
-        <p>Designed & Developed by Parimal Hodar | <a
-                href="mailto:parimalhodar.dev@gmail.com">parimalhodar.dev@gmail.com</a></p>
+        <p>Designed & Developed by Parimal Hodar |
+            <a href="mailto:parimalhodar.dev@gmail.com">
+                parimalhodar.dev@gmail.com
+            </a>
+        </p>
     </footer>
 
     <script>
@@ -101,9 +114,9 @@
                 return;
             }
 
-            fileNameDisplay.textContent = `📎 ${files.length} file${files.length > 1 ? 's' : ''} selected`;
+            fileNameDisplay.textContent =
+                `📎 ${files.length} file${files.length > 1 ? 's' : ''} selected`;
 
-            // Show file list
             let listHTML = '<div class="selected-files"><h4>Selected Files:</h4>';
             let totalSize = 0;
 
@@ -126,7 +139,8 @@
             const isOverLimit = totalSize > 100 * 1024 * 1024;
 
             listHTML += `<div class="total-size ${isOverLimit ? 'over-limit' : ''}">
-                Total: ${totalSizeFormatted} ${isOverLimit ? '⚠️ Exceeds 100MB limit!' : ''}
+                Total: ${totalSizeFormatted}
+                ${isOverLimit ? '⚠️ Exceeds 100MB limit!' : ''}
             </div></div>`;
 
             fileListDiv.innerHTML = listHTML;
@@ -163,7 +177,7 @@
                     btn.innerHTML = originalText;
                     btn.style.background = '';
                 }, 2000);
-            }).catch(err => {
+            }).catch(() => {
                 alert('Failed to copy code');
             });
         }
@@ -171,7 +185,7 @@
         function copyUrl() {
             const urlInput = document.getElementById('shareUrl');
             urlInput.select();
-            urlInput.setSelectionRange(0, 99999); // For mobile
+            urlInput.setSelectionRange(0, 99999);
 
             navigator.clipboard.writeText(urlInput.value).then(() => {
                 const btn = event.target;
@@ -182,16 +196,55 @@
                     btn.innerHTML = originalText;
                     btn.style.background = '';
                 }, 2000);
-            }).catch(err => {
-                // Fallback for older browsers
+            }).catch(() => {
                 document.execCommand('copy');
-                const btn = event.target;
-                btn.innerHTML = '✅ Copied!';
-                setTimeout(() => {
-                    btn.innerHTML = '📋 Copy Link';
-                }, 2000);
             });
         }
+
+        function startCountdown(code) {
+            const timerDisplay = document.getElementById('timer-display');
+            const timerWarning = document.getElementById('timer-warning');
+            const countdownTimer = document.getElementById('countdown-timer');
+
+            function updateTimer() {
+                fetch(`/api/check/${code}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (!data.valid || data.expired) {
+                            timerDisplay.textContent = 'EXPIRED';
+                            timerDisplay.style.color = '#c62828';
+                            countdownTimer.style.background = '#ffebee';
+                            timerWarning.style.display = 'block';
+
+                            setTimeout(() => {
+                                window.location.reload();
+                            }, 3000);
+                            return;
+                        }
+
+                        const minutes = Math.floor(data.remaining_seconds / 60);
+                        const seconds = data.remaining_seconds % 60;
+
+                        timerDisplay.textContent =
+                            `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+
+                        setTimeout(updateTimer, 1000);
+                    })
+                    .catch(() => {
+                        timerDisplay.textContent = 'ERROR';
+                    });
+            }
+
+            updateTimer();
+        }
+
+        // ✅ SAFE JINJA → JS (NO VS CODE ERRORS)
+        const uploadCode = "{{ code | default('') }}";
+
+        if (uploadCode) {
+            startCountdown(uploadCode);
+        }
+
     </script>
 
 </body>
