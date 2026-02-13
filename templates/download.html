@@ -45,6 +45,21 @@
                         📋 Copy Link
                     </button>
                 </div>
+
+                <!-- URL QR Code for this specific download link -->
+                <div class="url-qr-container">
+                    <div class="url-qr-header">
+                        <span class="url-qr-title">📱 Scan QR Code</span>
+                        <span class="url-qr-subtitle">Share this link via QR code</span>
+                    </div>
+                    <div class="url-qr-wrapper">
+                        <div id="url-qr-code" class="url-qr-code"></div>
+                    </div>
+                    <p class="url-qr-instruction">Scan with mobile camera to open this download page</p>
+                    <button class="btn-copy-small btn-download-qr" onclick="downloadQRCode()">
+                        ⬇️ Download QR Code
+                    </button>
+                </div>
             </div>
             {% endif %}
 
@@ -82,6 +97,18 @@
             <a href="/" class="link-back">← Back to Home</a>
         </div>
         {% endif %}
+    </div>
+
+    <!-- Website QR Code Section - Above Footer -->
+    <div class="qr-bottom-section">
+        <div class="qr-bottom-container">
+            <img src="{{ url_for('static_files', filename='URL_QR_Code.png') }}" alt="QR Code" class="qr-bottom-image"
+                title="Scan to open this website on your mobile device">
+            <div class="qr-bottom-text">
+                <span class="qr-bottom-title">📱 Mobile Access</span>
+                <span class="qr-bottom-subtitle">Scan to open this website on your phone</span>
+            </div>
+        </div>
     </div>
 
     <footer class="footer">
@@ -128,6 +155,57 @@
             }).catch(() => {
                 document.execCommand('copy');
             });
+        }
+
+        // QR Code Functions
+        function generateUrlQRCode() {
+            const shareUrl = document.getElementById('shareUrl')?.value;
+            if (shareUrl) {
+                // Load QR code library dynamically
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js';
+                script.onload = function () {
+                    const qrContainer = document.getElementById('url-qr-code');
+                    if (qrContainer) {
+                        qrContainer.innerHTML = ''; // Clear previous QR
+                        QRCode.toCanvas(shareUrl, {
+                            width: 180,
+                            margin: 2,
+                            color: {
+                                dark: '#667eea',
+                                light: '#ffffff'
+                            }
+                        }, function (error, canvas) {
+                            if (error) {
+                                console.error(error);
+                                qrContainer.innerHTML = '<p class="error-text">Failed to generate QR</p>';
+                            } else {
+                                qrContainer.appendChild(canvas);
+                                canvas.style.cursor = 'pointer';
+                                canvas.title = 'Click to download QR Code';
+                                canvas.onclick = function () {
+                                    downloadQRCodeFromCanvas(canvas);
+                                };
+                            }
+                        });
+                    }
+                };
+                document.head.appendChild(script);
+            }
+        }
+
+        function downloadQRCode() {
+            const canvas = document.querySelector('#url-qr-code canvas');
+            if (canvas) {
+                downloadQRCodeFromCanvas(canvas);
+            }
+        }
+
+        function downloadQRCodeFromCanvas(canvas) {
+            const link = document.createElement('a');
+            link.download = `file-transfer-${new Date().getTime()}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
         }
 
         function startCountdown(code) {
@@ -184,12 +262,20 @@
             updateTimer();
         }
 
-        // ✅ SAFE JINJA → JS (NO VS CODE ERRORS)
+        // Get values from Flask
         const downloadCode = "{{ code | default('') }}";
 
+        // Start countdown if code exists
         if (downloadCode) {
             startCountdown(downloadCode);
         }
+
+        // Generate QR code if share_url exists (checked by checking if element exists)
+        setTimeout(function () {
+            if (document.getElementById('shareUrl')) {
+                generateUrlQRCode();
+            }
+        }, 500);
 
     </script>
 
