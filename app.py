@@ -1,330 +1,164 @@
 # pyright: reportOptionalMemberAccess=false
-from flask import Flask, render_template, request, send_file, jsonify, send_from_directory
 import os
 import random
 import string
 import logging
-from datetime import datetime, timedelta
-from pathlib import Path
 import threading
 import time
-import zipfile
-from io import BytesIO
+from datetime import datetime, timedelta
+from pathlib import Path
+from flask import Flask, render_template, request, send_file, jsonify, send_from_directory, redirect, url_for, session
 from werkzeug.utils import secure_filename
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
+app.secret_key = "super_secret_key_for_session" # Needed for unique usernames
 
-# ────────────────────────────────────────────────
-#  CONFIGURATION
-# ────────────────────────────────────────────────
-
+# CONFIGURATION
 UPLOAD_FOLDER = "uploads"
-MAX_TOTAL_SIZE_BYTES = 100 * 1024 * 1024      # 100 MB total
-MAX_SINGLE_FILE_SIZE_BYTES = 80 * 1024 * 1024  # prevent one huge file
-
+ROOM_DURATION_MINS = 30
+MAX_TOTAL_SIZE = 100 * 1024 * 1024 
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = MAX_TOTAL_SIZE_BYTES
 
-# Ensure upload folder exists
 Path(UPLOAD_FOLDER).mkdir(parents=True, exist_ok=True)
 
-# ────────────────────────────────────────────────
-#  LOGGING
-# ────────────────────────────────────────────────
+# In-memory store
+room_store = {}
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+# Names for random username generation
+ADJECTIVES = ["Swift", "Brave", "Shiny", "Cool", "Clever", "Happy", "Silver", "Neon"]
+ANIMALS = ["Tiger", "Panda", "Fox", "Eagle", "Wolf", "Dolphin", "Lion", "Falcon"]
 
 # ────────────────────────────────────────────────
-#  STARTUP CLEANUP – aggressive cleanup of old files
+#  HELPERS
 # ────────────────────────────────────────────────
 
-def startup_cleanup():
-    MAX_STARTUP_AGE_MIN = 30
-    count = 0
-    now = time.time()
-    for path in Path(UPLOAD_FOLDER).iterdir():
-        if path.is_file():
-            age_min = (now - path.stat().st_mtime) / 60
-            if age_min > MAX_STARTUP_AGE_MIN:
-                try:
-                    path.unlink()
-                    count += 1
-                    logger.info(f"Startup deleted old file: {path.name} ({age_min:.1f} min old)")
-                except Exception as e:
-                    logger.error(f"Startup delete failed {path.name}: {e}")
-    if count:
-        logger.info(f"Startup cleanup removed {count} old files")
+def get_or_create_user():
+    """Assigns a unique username to the user's browser session."""
+    if 'username' not in session:
+        name = f"{random.choice(ADJECTIVES)}-{random.choice(ANIMALS)}-{random.randint(10, 99)}"
+        session['username'] = name
+    return session['username']
 
-startup_cleanup()
+def generate_code(length=6):
+    while True:
+        code = ''.join(random.choices(string.digits, k=length))
+        if code not in room_store: return code
 
-# ────────────────────────────────────────────────
-#  IN-MEMORY STORE (still used, but not the only truth)
-# ────────────────────────────────────────────────
-
-file_store = {}  # code → {"files": [...], "timestamp": datetime}
-
-def generate_code(length: int = 6) -> str:
-    return ''.join(random.choices(string.digits, k=length))
-
-def get_human_size(size_bytes: int | float) -> str:
-    size: float = float(size_bytes)
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size < 1024.0:
-            return f"{size:.1f} {unit}"
+def get_human_size(size_bytes):
+    size = float(size_bytes)
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024.0: return f"{size:.1f} {unit}"
         size /= 1024.0
     return f"{size:.1f} PB"
 
-def get_file_type(filename: str) -> str:
-    ext = Path(filename).suffix.lstrip('.')
-    return ext.upper() if ext else "FILE"
+def add_history(code, user, action):
+    """Adds an event to the room activity log."""
+    if code in room_store:
+        timestamp = datetime.now().strftime("%I:%M %p")
+        room_store[code]['history'].insert(0, {
+            "user": user,
+            "action": action,
+            "time": timestamp
+        })
 
 # ────────────────────────────────────────────────
-#  STRONG BACKGROUND CLEANUP – disk-first + unknown files
+#  CLEANUP THREAD
 # ────────────────────────────────────────────────
-
-def cleanup_old_files():
-    EXPIRATION_SECONDS = 15 * 60          # 15 minutes
-    CHECK_INTERVAL_SECONDS = 60           # check every 1 minute
-
+def cleanup_expired_rooms():
     while True:
-        try:
-            now = time.time()
-            upload_path = Path(UPLOAD_FOLDER)
+        now = datetime.now()
+        expired_codes = [c for c, d in room_store.items() if now - d['timestamp'] > timedelta(minutes=ROOM_DURATION_MINS)]
+        for code in expired_codes:
+            for f in room_store[code]['files']:
+                Path(UPLOAD_FOLDER, f['stored_name']).unlink(missing_ok=True)
+            del room_store[code]
+        time.sleep(60)
 
-            if not upload_path.exists():
-                time.sleep(CHECK_INTERVAL_SECONDS)
-                continue
-
-            deleted_expired = 0
-            deleted_unknown = 0
-
-            for path in upload_path.iterdir():
-                if not path.is_file():
-                    continue
-
-                age_seconds = now - path.stat().st_mtime
-
-                # Delete expired files (based on disk timestamp)
-                if age_seconds > EXPIRATION_SECONDS:
-                    try:
-                        path.unlink()
-                        deleted_expired += 1
-                        logger.info(f"Deleted expired file: {path.name} (age: {age_seconds//60:.0f} min)")
-                    except Exception as e:
-                        logger.error(f"Failed to delete expired {path.name}: {e}")
-
-                # Delete unknown/orphan files (not matching 6digits_ pattern)
-                elif not (path.name[:6].isdigit() and path.name[6] == '_'):
-                    try:
-                        path.unlink()
-                        deleted_unknown += 1
-                        logger.info(f"Deleted unknown/orphan file: {path.name}")
-                    except Exception as e:
-                        logger.error(f"Failed to delete unknown {path.name}: {e}")
-
-            if deleted_expired or deleted_unknown:
-                logger.info(
-                    f"Cleanup: removed {deleted_expired} expired + {deleted_unknown} unknown files"
-                )
-
-            # Also clean memory store (optional but good hygiene)
-            expired_codes = []
-            for code, data in list(file_store.items()):
-                ts = data.get("timestamp")
-                if ts and (datetime.now() - ts).total_seconds() > EXPIRATION_SECONDS:
-                    expired_codes.append(code)
-
-            for code in expired_codes:
-                del file_store[code]
-                logger.debug(f"Removed expired code from memory: {code}")
-
-        except Exception as e:
-            logger.error(f"Cleanup thread error: {e}")
-
-        time.sleep(CHECK_INTERVAL_SECONDS)
-
-# Start cleanup thread
-threading.Thread(target=cleanup_old_files, daemon=True).start()
+threading.Thread(target=cleanup_expired_rooms, daemon=True).start()
 
 # ────────────────────────────────────────────────
 #  ROUTES
 # ────────────────────────────────────────────────
 
-@app.route("/", methods=["GET", "POST"])
+@app.route("/")
 def index():
+    user = get_or_create_user() # Assign name on first visit
+    error = request.args.get('error')
+    return render_template("index.html", error=error, username=user)
+
+@app.route("/create-room", methods=["POST"])
+def create_room():
+    user = get_or_create_user()
+    code = generate_code()
+    room_store[code] = {
+        "timestamp": datetime.now(),
+        "host": user,
+        "files": [],
+        "history": []
+    }
+    add_history(code, user, "created the room (Host)")
+    return redirect(url_for('room_page', code=code))
+
+@app.route("/join", methods=["POST"])
+def join_room():
+    code = request.form.get("code", "").strip()
+    if code in room_store:
+        user = get_or_create_user()
+        add_history(code, user, "joined the room")
+        return redirect(url_for('room_page', code=code))
+    return redirect(url_for('index', error="Room not found"))
+
+@app.route("/room/<code>", methods=["GET", "POST"])
+def room_page(code):
+    if code not in room_store:
+        return redirect(url_for('index', error="Room expired"))
+
+    user = get_or_create_user()
+    room = room_store[code]
+
     if request.method == "POST":
-        files = request.files.getlist("file")
-        if not files or all(not f.filename.strip() for f in files):
-            return render_template("index.html", error="No files selected")
+        uploaded_files = request.files.getlist("file")
+        for file in uploaded_files:
+            if file and file.filename:
+                orig = file.filename
+                stored = f"{code}_{int(time.time())}_{secure_filename(orig)}"
+                path = Path(UPLOAD_FOLDER) / stored
+                file.save(path)
+                
+                file_data = {
+                    "original_name": orig,
+                    "stored_name": stored,
+                    "size": get_human_size(path.stat().st_size),
+                    "type": orig.split('.')[-1].upper() if '.' in orig else "FILE",
+                    "sender": user
+                }
+                room["files"].append(file_data)
+                add_history(code, user, f"sent: {orig}")
+        return redirect(url_for('room_page', code=code))
 
-        code = generate_code()
-        uploaded_files = []
-        total_size = 0
+    return render_template("room.html", 
+                           code=code, 
+                           files=room["files"], 
+                           history=room["history"],
+                           host=room["host"],
+                           my_username=user,
+                           share_url=f"{request.url_root.rstrip('/')}/room/{code}")
 
-        for file in files:
-            if not file or not file.filename:
-                continue
+@app.route("/download/<code>/<int:index>")
+def download_file(code, index):
+    if code in room_store and index < len(room_store[code]["files"]):
+        user = get_or_create_user()
+        file_info = room_store[code]["files"][index]
+        add_history(code, user, f"downloaded: {file_info['original_name']}")
+        return send_from_directory(UPLOAD_FOLDER, file_info["stored_name"], 
+                                   as_attachment=True, download_name=file_info["original_name"])
+    return "Not found", 404
 
-            original_name = file.filename
-            safe_name = secure_filename(original_name)
-            stored_name = f"{code}_{safe_name}"
-
-            path = Path(UPLOAD_FOLDER) / stored_name
-            file.save(path)
-
-            file_size = path.stat().st_size
-            total_size += file_size
-
-            if total_size > MAX_TOTAL_SIZE_BYTES:
-                for f in uploaded_files:
-                    (Path(UPLOAD_FOLDER) / f["filename"]).unlink(missing_ok=True)
-                path.unlink(missing_ok=True)
-                return render_template("index.html", error="Total size exceeds 100 MB limit")
-
-            if file_size > MAX_SINGLE_FILE_SIZE_BYTES:
-                path.unlink(missing_ok=True)
-                return render_template("index.html", error="Single file too large (max ~80 MB)")
-
-            uploaded_files.append({
-                "filename": stored_name,
-                "original_name": original_name,
-                "size": get_human_size(file_size),
-                "type": get_file_type(original_name)
-            })
-
-        if not uploaded_files:
-            return render_template("index.html", error="No valid files uploaded")
-
-        file_store[code] = {
-            "files": uploaded_files,
-            "timestamp": datetime.now()
-        }
-
-        base = request.url_root.rstrip("/")
-        share_url = f"{base}/d/{code}"
-
-        logger.info(f"New upload – code: {code} – files: {len(uploaded_files)}")
-
-        return render_template(
-            "index.html",
-            code=code,
-            files=uploaded_files,
-            share_url=share_url
-        )
-
-    return render_template("index.html")
-
-
-@app.route("/d/<code>")
-@app.route("/download", methods=["POST"])
-def download_page(code: str | None = None):
-    if code is None and request.method == "POST":
-        code = request.form.get("code", "").strip()
-
-    if not code or code not in file_store:
-        return render_template("download.html", error="Invalid or expired code")
-
-    data = file_store[code]
-    files = data["files"]
-
-    base = request.url_root.rstrip("/")
-    share_url = f"{base}/d/{code}"
-
-    return render_template(
-        "download.html",
-        code=code,
-        files=files,
-        share_url=share_url
-    )
-
-
-@app.route("/get_file/<code>/<int:index>")
-def get_file(code: str, index: int):
-    if code not in file_store:
-        return "Not found", 404
-
-    files = file_store[code].get("files", [])
-    if not (0 <= index < len(files)):
-        return "Invalid file index", 404
-
-    info = files[index]
-    return send_from_directory(
-        UPLOAD_FOLDER,
-        info["filename"],
-        as_attachment=True,
-        download_name=info["original_name"]
-    )
-
-
-@app.route("/get_all_files/<code>")
-def get_all_files(code: str):
-    if code not in file_store:
-        return "Not found", 404
-
-    files = file_store[code].get("files", [])
-
-    if len(files) == 1:
-        info = files[0]
-        return send_from_directory(
-            UPLOAD_FOLDER,
-            info["filename"],
-            as_attachment=True,
-            download_name=info["original_name"]
-        )
-
-    memory = BytesIO()
-    with zipfile.ZipFile(memory, "w", zipfile.ZIP_DEFLATED) as zf:
-        for info in files:
-            path = Path(UPLOAD_FOLDER) / info["filename"]
-            if path.is_file():
-                zf.write(path, info["original_name"])
-
-    memory.seek(0)
-
-    return send_file(
-        memory,
-        as_attachment=True,
-        download_name=f"files_{code}.zip",
-        mimetype="application/zip"
-    )
-
-
-@app.route("/api/check/<code>")
-def api_check(code: str):
-    if code not in file_store:
-        return jsonify({"valid": False, "expired": True, "remaining_seconds": 0})
-
-    ts = file_store[code].get("timestamp")
-    if not ts:
-        return jsonify({"valid": False, "expired": True, "remaining_seconds": 0})
-
-    remaining = (timedelta(minutes=15) - (datetime.now() - ts)).total_seconds()
-    if remaining <= 0:
-        return jsonify({"valid": False, "expired": True, "remaining_seconds": 0})
-
-    return jsonify({
-        "valid": True,
-        "expired": False,
-        "remaining_seconds": int(remaining),
-        "minutes": int(remaining // 60),
-        "seconds": int(remaining % 60)
-    })
-
-
-@app.route("/static/<path:filename>")
-def static_files(filename: str):
-    return send_from_directory("static", filename)
-
-
-# ────────────────────────────────────────────────
-#  ENTRY POINT
-# ────────────────────────────────────────────────
+@app.route("/api/timer/<code>")
+def api_timer(code):
+    if code not in room_store: return jsonify({"expired": True})
+    rem = (timedelta(minutes=ROOM_DURATION_MINS) - (datetime.now() - room_store[code]["timestamp"])).total_seconds()
+    return jsonify({"expired": rem <= 0, "remaining_seconds": int(max(0, rem))})
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=True)

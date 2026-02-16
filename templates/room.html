@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Room {{ code }}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .user-badge {
+            background: #eee;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .history-box {
+            max-height: 200px;
+            overflow-y: auto;
+            background: #fdfdfd;
+            border-radius: 8px;
+            padding: 10px;
+            border: 1px solid #eee;
+        }
+
+        .history-item {
+            font-size: 13px;
+            margin-bottom: 5px;
+            border-bottom: 1px solid #f0f0f0;
+            padding-bottom: 3px;
+        }
+
+        .history-time {
+            color: #999;
+            font-size: 11px;
+            margin-right: 5px;
+        }
+
+        .sender-name {
+            font-size: 11px;
+            color: #667eea;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="card" style="text-align: center;">
+            <p style="margin-bottom: 5px; font-size: 14px;">You are: <span class="user-badge">{{ my_username }}</span>
+            </p>
+            <h2 style="margin: 0;">Room: {{ code }}</h2>
+
+            <div class="timer-container">
+                <div class="countdown-timer"><span id="timer-display">30:00</span></div>
+            </div>
+
+            <div class="url-qr-container">
+                <canvas id="url-qr-code" style="margin-bottom: 10px;"></canvas>
+                <input type="text" id="shareUrl" value="{{ share_url }}" readonly class="share-url-input">
+                <button class="btn-copy-small" onclick="copyUrl()">📋 Copy Link</button>
+            </div>
+        </div>
+
+        <!-- Room Activity History -->
+        <div class="card">
+            <h3>📜 Room Activity</h3>
+            <div class="history-box">
+                {% for log in history %}
+                <div class="history-item">
+                    <span class="history-time">[{{ log.time }}]</span>
+                    <strong>{{ log.user }}</strong> {{ log.action }}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>📤 Send Files</h3>
+            <form id="upForm" method="POST" enctype="multipart/form-data">
+                <label for="f" class="file-label">Tap to Send Files</label>
+                <input type="file" name="file" id="f" multiple required style="display:none"
+                    onchange="document.getElementById('upForm').submit()">
+            </form>
+        </div>
+
+        <div class="card">
+            <h3>📥 Received Files</h3>
+            <div class="files-container">
+                {% for file in files %}
+                <div class="download-file-item">
+                    <div class="file-info">
+                        <span class="file-type-badge">{{ file.type }}</span>
+                        <div class="file-details">
+                            <span class="file-name">{{ file.original_name }}</span>
+                            <span class="sender-name">By: {{ file.sender }} • {{ file.size }}</span>
+                        </div>
+                    </div>
+                    <a href="/download/{{ code }}/{{ loop.index0 }}" class="btn-icon">📥</a>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <a href="/" class="link-back">← Exit Room</a>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+    <script>
+        QRCode.toCanvas(document.getElementById('url-qr-code'), "{{ share_url }}", { width: 140, margin: 1, color: { dark: '#667eea' } });
+        function updateTimer() {
+            fetch('/api/timer/{{ code }}').then(r => r.json()).then(d => {
+                if (d.expired) window.location.href = "/?error=Expired";
+                let m = Math.floor(d.remaining_seconds / 60), s = d.remaining_seconds % 60;
+                document.getElementById('timer-display').innerText = `${m}:${s < 10 ? '0' + s : s}`;
+            });
+        }
+        setInterval(updateTimer, 1000);
+        function copyUrl() { let i = document.getElementById('shareUrl'); i.select(); navigator.clipboard.writeText(i.value); alert("Link Copied!"); }
+    </script>
+</body>
+
+</html>

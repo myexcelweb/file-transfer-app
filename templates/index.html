@@ -1,337 +1,58 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 
 <head>
-    <title>File Transfer</title>
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="{{ url_for('static_files', filename='style.css') }}">
+    <title>File Transfer Room</title>
+    <!-- CRITICAL: This line must use 'static' to match app.py -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 
 <body>
 
     <div class="container">
-        <h1>📁 File Transfer</h1>
-        <p class="subtitle">Share files instantly with a code</p>
+        <h1>📁 File Transfer Room</h1>
+        <p class="subtitle">Create a temporary room to share files</p>
 
+        <!-- CREATE ROOM SECTION -->
         <div class="card">
-            <h2>📤 Upload Files</h2>
-            <form method="POST" enctype="multipart/form-data">
-                <div class="file-input-wrapper">
-                    <input type="file" name="file" id="file" multiple required>
-                    <label for="file" class="file-label">
-                        <span id="file-name">📎 Choose Files</span>
-                    </label>
-                </div>
-                <div id="file-list" class="file-list"></div>
-                <button type="submit" class="btn btn-primary">Upload</button>
+            <h2>📤 Start a Transfer</h2>
+            <p style="text-align: center; color: #666; margin-bottom: 20px;">
+                Create a private room. Files and the room will be deleted automatically after 30 minutes.
+            </p>
+            <form action="/create-room" method="POST">
+                <button type="submit" class="btn btn-primary">Create Room (30 Min)</button>
             </form>
-            <p class="info">Max total size: 100MB • Multiple files supported</p>
-
-            {% if error %}
-            <div class="error-box">
-                <h3>❌ Error</h3>
-                <p>{{ error }}</p>
-            </div>
-            {% endif %}
-
-            {% if code %}
-            <div class="success-box">
-                <h3>✅ Upload Successful!</h3>
-                <div class="code-display">{{ code }}</div>
-                <button class="btn-copy" onclick="copyCode('{{ code }}')">
-                    📋 Copy Code
-                </button>
-
-                <div class="timer-container">
-                    <p class="timer-label">⏱️ Time Remaining:</p>
-                    <div class="countdown-timer" id="countdown-timer">
-                        <span id="timer-display">Loading...</span>
-                    </div>
-                    <p class="timer-warning" id="timer-warning" style="display: none;">
-                        ⚠️ Files will be deleted automatically when timer expires
-                    </p>
-                </div>
-
-                <p>Share this code to download the files</p>
-
-                {% if share_url %}
-                <div class="share-section">
-                    <h4>Or share this link:</h4>
-                    <div class="share-url-container">
-                        <input type="text" id="shareUrl" value="{{ share_url }}" readonly class="share-url-input">
-                        <button class="btn-copy-small" onclick="copyUrl()">
-                            📋 Copy Link
-                        </button>
-                    </div>
-
-                    <!-- URL QR Code for this specific download link -->
-                    <div class="url-qr-container">
-                        <div class="url-qr-header">
-                            <span class="url-qr-title">📱 Scan QR Code</span>
-                            <span class="url-qr-subtitle">Share this link via QR code</span>
-                        </div>
-                        <div class="url-qr-wrapper">
-                            <div id="url-qr-code" class="url-qr-code"></div>
-                        </div>
-                        <p class="url-qr-instruction">Scan with mobile camera to open download page</p>
-                        <button class="btn-copy-small btn-download-qr" onclick="downloadQRCode()">
-                            ⬇️ Download QR Code
-                        </button>
-                    </div>
-                </div>
-                {% endif %}
-
-                {% if files %}
-                <div class="uploaded-files">
-                    <h4>Uploaded Files:</h4>
-                    {% for file in files %}
-                    <div class="file-item">
-                        <span class="file-type-badge">{{ file.type }}</span>
-                        <span class="file-name">{{ file.original_name }}</span>
-                        <span class="file-size">{{ file.size }}</span>
-                    </div>
-                    {% endfor %}
-                </div>
-                {% endif %}
-            </div>
-            {% endif %}
+            <p class="info">No registration required • Instant setup</p>
         </div>
 
+        <!-- JOIN ROOM SECTION -->
         <div class="card">
-            <h2>📥 Download Files</h2>
-            <form action="/download" method="POST">
+            <h2>📥 Join a Room</h2>
+            <form action="/join" method="POST">
                 <input type="text" name="code" placeholder="Enter 6-digit code" pattern="[0-9]{6}" maxlength="6"
                     required>
-                <button type="submit" class="btn btn-secondary">Get Files</button>
+                <button type="submit" class="btn btn-secondary">Join Room</button>
             </form>
+            <p class="info">Enter the password or scan the QR code to enter</p>
         </div>
 
-        <!-- Website QR Code Section - Above Footer -->
-        <div class="qr-bottom-section">
-            <div class="qr-bottom-container">
-                <img src="{{ url_for('static_files', filename='URL_QR_Code.png') }}" alt="QR Code"
-                    class="qr-bottom-image" title="Scan to open this website on your mobile device">
-                <div class="qr-bottom-text">
-                    <span class="qr-bottom-title">📱 Mobile Access</span>
-                    <span class="qr-bottom-subtitle">Scan to open this website on your phone</span>
-                </div>
-            </div>
+        {% if error %}
+        <div class="error-box">
+            <h3>❌ Error</h3>
+            <p>{{ error }}</p>
+            <a href="/" class="link-back">Try again</a>
         </div>
+        {% endif %}
     </div>
 
     <footer class="footer">
-        <p>Designed & Developed by Parimal Hodar |
-            <a href="mailto:parimalhodar.dev@gmail.com">
-                parimalhodar.dev@gmail.com
-            </a>
+        <p>
+            Designed & Developed by Parimal Hodar |
+            <a href="mailto:parimalhodar.dev@gmail.com">parimalhodar.dev@gmail.com</a>
         </p>
     </footer>
-
-    <script>
-        const fileInput = document.getElementById('file');
-        const fileNameDisplay = document.getElementById('file-name');
-        const fileListDiv = document.getElementById('file-list');
-
-        fileInput.addEventListener('change', function (e) {
-            const files = e.target.files;
-
-            if (files.length === 0) {
-                fileNameDisplay.textContent = '📎 Choose Files';
-                fileListDiv.innerHTML = '';
-                return;
-            }
-
-            fileNameDisplay.textContent =
-                `📎 ${files.length} file${files.length > 1 ? 's' : ''} selected`;
-
-            let listHTML = '<div class="selected-files"><h4>Selected Files:</h4>';
-            let totalSize = 0;
-
-            for (let i = 0; i < files.length; i++) {
-                const file = files[i];
-                totalSize += file.size;
-                const size = formatFileSize(file.size);
-                const type = getFileType(file.name);
-
-                listHTML += `
-                    <div class="file-item-preview">
-                        <span class="file-type-badge">${type}</span>
-                        <span class="file-name">${truncateFileName(file.name, 25)}</span>
-                        <span class="file-size">${size}</span>
-                    </div>
-                `;
-            }
-
-            const totalSizeFormatted = formatFileSize(totalSize);
-            const isOverLimit = totalSize > 100 * 1024 * 1024;
-
-            listHTML += `<div class="total-size ${isOverLimit ? 'over-limit' : ''}">
-                Total: ${totalSizeFormatted}
-                ${isOverLimit ? '⚠️ Exceeds 100MB limit!' : ''}
-            </div></div>`;
-
-            fileListDiv.innerHTML = listHTML;
-        });
-
-        function formatFileSize(bytes) {
-            if (bytes === 0) return '0 B';
-            const k = 1024;
-            const sizes = ['B', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-        }
-
-        function getFileType(filename) {
-            const ext = filename.split('.').pop().toUpperCase();
-            return ext || 'FILE';
-        }
-
-        function truncateFileName(name, maxLength) {
-            if (name.length <= maxLength) return name;
-            const ext = name.split('.').pop();
-            const nameWithoutExt = name.substring(0, name.length - ext.length - 1);
-            const truncated = nameWithoutExt.substring(0, maxLength - ext.length - 4);
-            return truncated + '...' + ext;
-        }
-
-        function copyCode(code) {
-            navigator.clipboard.writeText(code).then(() => {
-                const btn = event.target;
-                const originalText = btn.innerHTML;
-                btn.innerHTML = '✅ Copied!';
-                btn.style.background = '#4CAF50';
-                setTimeout(() => {
-                    btn.innerHTML = originalText;
-                    btn.style.background = '';
-                }, 2000);
-            }).catch(() => {
-                alert('Failed to copy code');
-            });
-        }
-
-        function copyUrl() {
-            const urlInput = document.getElementById('shareUrl');
-            urlInput.select();
-            urlInput.setSelectionRange(0, 99999);
-
-            navigator.clipboard.writeText(urlInput.value).then(() => {
-                const btn = event.target;
-                const originalText = btn.innerHTML;
-                btn.innerHTML = '✅ Copied!';
-                btn.style.background = '#4CAF50';
-                setTimeout(() => {
-                    btn.innerHTML = originalText;
-                    btn.style.background = '';
-                }, 2000);
-            }).catch(() => {
-                document.execCommand('copy');
-            });
-        }
-
-        // QR Code Functions
-        function generateUrlQRCode() {
-            const shareUrl = document.getElementById('shareUrl')?.value;
-            if (shareUrl) {
-                // Load QR code library dynamically
-                const script = document.createElement('script');
-                script.src = 'https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js';
-                script.onload = function () {
-                    const qrContainer = document.getElementById('url-qr-code');
-                    if (qrContainer) {
-                        qrContainer.innerHTML = ''; // Clear previous QR
-                        QRCode.toCanvas(shareUrl, {
-                            width: 180,
-                            margin: 2,
-                            color: {
-                                dark: '#667eea',
-                                light: '#ffffff'
-                            }
-                        }, function (error, canvas) {
-                            if (error) {
-                                console.error(error);
-                                qrContainer.innerHTML = '<p class="error-text">Failed to generate QR</p>';
-                            } else {
-                                qrContainer.appendChild(canvas);
-                                canvas.style.cursor = 'pointer';
-                                canvas.title = 'Click to download QR Code';
-                                canvas.onclick = function () {
-                                    downloadQRCodeFromCanvas(canvas);
-                                };
-                            }
-                        });
-                    }
-                };
-                document.head.appendChild(script);
-            }
-        }
-
-        function downloadQRCode() {
-            const canvas = document.querySelector('#url-qr-code canvas');
-            if (canvas) {
-                downloadQRCodeFromCanvas(canvas);
-            }
-        }
-
-        function downloadQRCodeFromCanvas(canvas) {
-            const link = document.createElement('a');
-            link.download = `file-transfer-${new Date().getTime()}.png`;
-            link.href = canvas.toDataURL('image/png');
-            link.click();
-        }
-
-        function startCountdown(code) {
-            const timerDisplay = document.getElementById('timer-display');
-            const timerWarning = document.getElementById('timer-warning');
-            const countdownTimer = document.getElementById('countdown-timer');
-
-            function updateTimer() {
-                fetch(`/api/check/${code}`)
-                    .then(response => response.json())
-                    .then(data => {
-                        if (!data.valid || data.expired) {
-                            timerDisplay.textContent = 'EXPIRED';
-                            timerDisplay.style.color = '#c62828';
-                            countdownTimer.style.background = '#ffebee';
-                            timerWarning.style.display = 'block';
-
-                            setTimeout(() => {
-                                window.location.reload();
-                            }, 3000);
-                            return;
-                        }
-
-                        const minutes = Math.floor(data.remaining_seconds / 60);
-                        const seconds = data.remaining_seconds % 60;
-
-                        timerDisplay.textContent =
-                            `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-
-                        setTimeout(updateTimer, 1000);
-                    })
-                    .catch(() => {
-                        timerDisplay.textContent = 'ERROR';
-                    });
-            }
-
-            updateTimer();
-        }
-
-        // Get values from Flask
-        const uploadCode = "{{ code | default('') }}";
-
-        // Start countdown if code exists
-        if (uploadCode) {
-            startCountdown(uploadCode);
-        }
-
-        // Generate QR code if share_url exists (checked by checking if element exists)
-        setTimeout(function () {
-            if (document.getElementById('shareUrl')) {
-                generateUrlQRCode();
-            }
-        }, 500);
-
-    </script>
 
 </body>
 
